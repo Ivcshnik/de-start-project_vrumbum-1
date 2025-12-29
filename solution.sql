@@ -303,7 +303,6 @@ ORDER BY c.country_name;
 
 
 ---- Задание 6. Напишите запрос, который покажет количество всех пользователей из США. Это пользователи, у которых номер телефона начинается на +1.
-
 SELECT 
     COUNT(*) AS persons_from_usa_count
 FROM car_shop.customers
