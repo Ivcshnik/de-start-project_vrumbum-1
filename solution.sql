@@ -46,15 +46,16 @@ CREATE TABLE car_shop.countries (
 CREATE TABLE car_shop.brands (
     brand_id SERIAL PRIMARY KEY,           /* автоинкремент для уникального идентификатора */
     brand_name VARCHAR(50) NOT NULL UNIQUE, /* varchar для названий брендов с буквами и цифрами */
-    country_id INTEGER REFERENCES car_shop.countries(country_id) ON DELETE SET NULL, /* внешний ключ к стране */
+    country_id INTEGER REFERENCES car_shop.countries(country_id) ON DELETE SET NULL /* внешний ключ к стране */
 );
 
 -- 2. Таблица моделей автомобилей
 CREATE TABLE car_shop.models (
     model_id SERIAL PRIMARY KEY,           /* автоинкремент для уникального идентификатора */
-    brand_id INTEGER UNIQUE NOT NULL REFERENCES car_shop.brands(brand_id), /* внешний ключ к бренду */
-    model_name VARCHAR(50) UNIQUE NOT NULL,       /* название модели */
+    brand_id INTEGER NOT NULL REFERENCES car_shop.brands(brand_id), /* внешний ключ к бренду */
+    model_name VARCHAR(100) NOT NULL,       /* название модели */
     fuel_consumption DECIMAL(5,2) CHECK (fuel_consumption > 0 OR fuel_consumption IS NULL) /* decimal для точности, NULL для электромобилей */
+    UNIQUE(brand_id, model_name)  -- составное уникальное ограничение
 );
 
 -- 3. Таблица цветов
@@ -67,7 +68,7 @@ CREATE TABLE car_shop.colors (
 CREATE TABLE car_shop.customers (
     customer_id SERIAL PRIMARY KEY,        /* автоинкремент для уникального идентификатора */
     full_name VARCHAR(100) NOT NULL,       /* полное имя клиента */
-    phone VARCHAR(20) UNIQUE,                     /* телефонный номер в разном формате */
+    phone VARCHAR(20) UNIQUE                     /* телефонный номер в разном формате */
 );
 
 -- 5. Основная таблица продаж
@@ -75,10 +76,10 @@ CREATE TABLE car_shop.sales (
     sale_id SERIAL PRIMARY KEY,            /* автоинкремент для уникального идентификатора */
     sale_date DATE NOT NULL,               /* дата продажи */
     price DECIMAL(10,2) NOT NULL CHECK (price > 0), /* цена продажи, decimal для точности */
-    model_id INTEGER NOT NULL REFERENCES car_shop.models(model_id), /* внешний ключ к модели */
-    brand_id INTEGER NOT NULL REFERENCES car_shop.brands(brand_id), /* внешний ключ к бренду */
-    customer_id INTEGER NOT NULL REFERENCES car_shop.customers(customer_id), /* внешний ключ к клиенту */
-    discount_rate DECIMAL(5,2) DEFAULT 0 CHECK (discount_rate BETWEEN 0 AND 100) /* процент скидки 0-100 */
+    model_id INTEGER REFERENCES car_shop.models(model_id), /* внешний ключ к модели */
+    customer_id INTEGER REFERENCES car_shop.customers(customer_id), /* внешний ключ к клиенту */
+    discount_rate DECIMAL(5,2) DEFAULT 0 CHECK (discount_rate BETWEEN 0 AND 100), /* процент скидки 0-100 */
+    model_color_id INTEGER REFERENCES car_shop.colors(color_id),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP /* время создания записи */
 );
 
@@ -130,40 +131,29 @@ FROM raw_data.sales
 ORDER BY brand_origin
 ON CONFLICT (country_name) DO NOTHING;
 
--- 4. Заполняем таблицу брендов
+-- 4. Заполняем таблицу брендов (с LEFT JOIN)
 INSERT INTO car_shop.brands (brand_name, country_id)
 SELECT DISTINCT 
-TRIM(SPLIT_PART(SPLIT_PART(auto, ',', 1), ' ', 1)) AS brand_name,
-country_id 
-FROM raw_data.sales s JOIN car_shop.countries c ON c.country_name = s.brand_origin
+    TRIM(split_part(s.auto, ' ', 1)) AS brand_name,
+    c.country_id 
+FROM raw_data.sales s 
+LEFT JOIN car_shop.countries c ON c.country_name = s.brand_origin
+WHERE TRIM(split_part(s.auto, ' ', 1)) != ''
 ON CONFLICT (brand_name) DO UPDATE SET
     country_id = EXCLUDED.country_id;
 
-/* Без громозких проверок на модель таблица заполняется некорректно.*/
+
 -- 5. Заполняем таблицу моделей
 INSERT INTO car_shop.models (brand_id, model_name, fuel_consumption)
 SELECT DISTINCT 
     b.brand_id,
-    CASE 
-        WHEN SPLIT_PART(auto, ',', 1) LIKE '%Tesla Model%' THEN
-            TRIM(SPLIT_PART(SPLIT_PART(auto, ',', 1), ' ', 2) || ' ' || 
-                 SPLIT_PART(SPLIT_PART(auto, ',', 1), ' ', 3))
-        ELSE
-            TRIM(SUBSTRING(SPLIT_PART(auto, ',', 1) FROM POSITION(' ' IN SPLIT_PART(auto, ',', 1)) + 1))
-    END AS model_name,
+    trim(substring(split_part(rs.auto, ',', 1) FROM position(' ' IN auto))) AS model,
     CASE 
         WHEN gasoline_consumption = 0 THEN NULL
         ELSE gasoline_consumption
     END AS fuel_consumption
 FROM raw_data.sales rs
-JOIN car_shop.brands b ON b.brand_name = 
-    CASE 
-        WHEN SPLIT_PART(rs.auto, ',', 1) = 'Tesla Model X' THEN 'Tesla'
-        WHEN SPLIT_PART(rs.auto, ',', 1) = 'Tesla Model Y' THEN 'Tesla'
-        WHEN SPLIT_PART(rs.auto, ',', 1) = 'Tesla Model 3' THEN 'Tesla'
-        WHEN SPLIT_PART(rs.auto, ',', 1) = 'Tesla Model S' THEN 'Tesla'
-        ELSE TRIM(SPLIT_PART(SPLIT_PART(rs.auto, ',', 1), ' ', 1))
-    END
+JOIN car_shop.brands b ON b.brand_name = split_part(rs.auto, ' ', 1)
 ON CONFLICT (brand_id, model_name) DO NOTHING;
 
 -- Приводим все номера к виду ХХХ-ХХХ-ХХХХ через использования условий и регулярных выражений
@@ -195,35 +185,23 @@ WHERE phone IS NOT NULL; */
 
 
 -- 6. Заполняем таблицу продаж
-INSERT INTO car_shop.sales (sale_date, price, model_id, customer_id, discount_rate, model_color_id, brand_id)
+/* Проблема возникала из-за того, что при создании таблиц использовалось ограницение NOT NULL 
+для полей model_id, customer_id, model_color_id */
+INSERT INTO car_shop.sales (sale_date, price, model_id, customer_id, discount_rate, model_color_id)
 SELECT 
     rs.date,
     rs.price,
     m.model_id,
     c.customer_id,
     rs.discount,
-    col.color_id,
-    b.brand_id 
+    col.color_id 
 FROM raw_data.sales rs
-JOIN car_shop.brands b ON b.brand_name = 
-    CASE 
-        WHEN SPLIT_PART(rs.auto, ',', 1) = 'Tesla Model X' THEN 'Tesla'
-        WHEN SPLIT_PART(rs.auto, ',', 1) = 'Tesla Model Y' THEN 'Tesla'
-        WHEN SPLIT_PART(rs.auto, ',', 1) = 'Tesla Model 3' THEN 'Tesla'
-        WHEN SPLIT_PART(rs.auto, ',', 1) = 'Tesla Model S' THEN 'Tesla'
-        ELSE TRIM(SPLIT_PART(SPLIT_PART(rs.auto, ',', 1), ' ', 1))
-    END
-JOIN car_shop.models m ON m.brand_id = b.brand_id 
-    AND m.model_name = 
-        CASE 
-            WHEN SPLIT_PART(rs.auto, ',', 1) LIKE '%Tesla Model%' THEN
-                TRIM(SPLIT_PART(SPLIT_PART(rs.auto, ',', 1), ' ', 2) || ' ' || 
-                     SPLIT_PART(SPLIT_PART(rs.auto, ',', 1), ' ', 3))
-            ELSE
-                TRIM(SUBSTRING(SPLIT_PART(rs.auto, ',', 1) FROM POSITION(' ' IN SPLIT_PART(rs.auto, ',', 1)) + 1))
-        END
-JOIN car_shop.customers c ON c.phone = rs.phone
-join car_shop.colors col on col.color_name = TRIM(SPLIT_PART(auto, ',', 2));
+LEFT JOIN car_shop.models m ON m.model_name = TRIM(SUBSTRING(SPLIT_PART(rs.auto, ',', 1) FROM POSITION(' ' IN rs.auto) + 1))
+LEFT JOIN car_shop.customers c ON c.phone = rs.phone
+LEFT JOIN car_shop.colors col ON col.color_name = TRIM(SPLIT_PART(rs.auto, ',', 2))
+WHERE rs.date IS NOT NULL
+  AND rs.price IS NOT NULL
+  AND rs.price > 0;
     
 
 
